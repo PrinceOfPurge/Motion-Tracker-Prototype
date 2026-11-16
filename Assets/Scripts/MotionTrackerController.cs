@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.UI;
 using UnityEngine.InputSystem;
 using TMPro;
 using System.Collections;
@@ -6,24 +7,45 @@ using System.Collections.Generic;
 
 public class MotionTrackerController : MonoBehaviour
 {
+    public enum SweepMode
+    {
+        CircularSweep,
+        VerticalFill
+    }
+
     [System.Serializable]
     public class RadarTarget
     {
         [Tooltip("Label for identification in the Inspector (e.g., 'Xeno - Above')")]
         public string targetName;
         
-        [Tooltip("Drag the Top, Middle, or Bottom ring transform here")]
+        [Tooltip("Drag the Top, Middle, or Bottom ring/bar transform here")]
         public Transform ringTransform;
         
         [Tooltip("Check this to enable this enemy blip during your prototype run.")]
         public bool isEnabledForTest = true;
     }
 
+    [Header("Mode Selection")]
+    [Tooltip("Switch between CircularSweep and VerticalFill in the Inspector.")]
+    public SweepMode sweepMode = SweepMode.VerticalFill;
+
     [Header("References")]
     public GameObject trackerUI;
-    public Transform scanLineTransform;
     public List<RadarTarget> radarTargets = new List<RadarTarget>();
     public TextMeshProUGUI promptText;
+
+    [Header("Circular Sweep Settings (Old Scene)")]
+    public Transform scanLineTransform;
+    public float angularSpeed = 120f;
+
+    [Header("Vertical Fill Settings (New Scene)")]
+    [Tooltip("Drag your UI Image (Type: Filled, Method: Vertical) here.")]
+    public Image verticalFillImage;
+    [Tooltip("Speed of the vertical fill sweep (cycles per second).")]
+    public float verticalSweepSpeed = 0.5f;
+    [Tooltip("Match this to your Image's Fill Origin (true = Bottom, false = Top).")]
+    public bool sweepBottomToTop = true;
 
     [Header("Animation Settings")]
     public Transform loweredPosition;
@@ -36,6 +58,10 @@ public class MotionTrackerController : MonoBehaviour
     private bool isTracking = false;
     private float currentSweepAngle = 0f;
     private float previousSweepAngle = 0f;
+    private float currentFillAmount = 0f;
+    private float previousFillAmount = 0f;
+
+    private Coroutine transitionCoroutine;
     private Dictionary<Transform, Coroutine> activeBlipCoroutines = new Dictionary<Transform, Coroutine>();
 
     void Start()
@@ -65,8 +91,12 @@ public class MotionTrackerController : MonoBehaviour
         if (isHoldingSpace != isTracking)
         {
             isTracking = isHoldingSpace;
-            StopAllCoroutines();
-            StartCoroutine(AnimateTrackerTransition(isTracking));
+
+            if (transitionCoroutine != null)
+            {
+                StopCoroutine(transitionCoroutine);
+            }
+            transitionCoroutine = StartCoroutine(AnimateTrackerTransition(isTracking));
 
             if (promptText != null)
             {
@@ -76,7 +106,14 @@ public class MotionTrackerController : MonoBehaviour
 
         if (isTracking)
         {
-            HandleRadarSweepAndDetection();
+            if (sweepMode == SweepMode.CircularSweep)
+            {
+                HandleCircularSweepAndDetection();
+            }
+            else
+            {
+                HandleVerticalFillAndDetection();
+            }
         }
     }
 
@@ -91,7 +128,13 @@ public class MotionTrackerController : MonoBehaviour
         Vector3 endPos = targetState ? raisedPosition.localPosition : loweredPosition.localPosition;
         Quaternion endRot = targetState ? raisedPosition.localRotation : loweredPosition.localRotation;
 
-        if (targetState) trackerUI.SetActive(true);
+        if (targetState)
+        {
+            trackerUI.SetActive(true);
+            currentFillAmount = 0f;
+            previousFillAmount = 0f;
+            if (verticalFillImage != null) verticalFillImage.fillAmount = 0f;
+        }
 
         while (elapsedTime < duration)
         {
@@ -111,10 +154,10 @@ public class MotionTrackerController : MonoBehaviour
         if (!targetState) trackerUI.SetActive(false);
     }
 
-    void HandleRadarSweepAndDetection()
+    void HandleCircularSweepAndDetection()
     {
         previousSweepAngle = currentSweepAngle;
-        currentSweepAngle -= 120f * Time.deltaTime; 
+        currentSweepAngle -= angularSpeed * Time.deltaTime;
         currentSweepAngle = Mathf.Repeat(currentSweepAngle, 360f);
 
         if (scanLineTransform != null)
@@ -122,7 +165,6 @@ public class MotionTrackerController : MonoBehaviour
             scanLineTransform.localRotation = Quaternion.Euler(0, 0, currentSweepAngle);
         }
 
-        // Loop through configured targets and check if they are enabled in the Inspector
         foreach (RadarTarget target in radarTargets)
         {
             if (!target.isEnabledForTest || target.ringTransform == null) continue;
@@ -130,6 +172,37 @@ public class MotionTrackerController : MonoBehaviour
             float ringAngle = GetAngleFromCenter(target.ringTransform);
 
             if (CheckAngleCrossed(previousSweepAngle, currentSweepAngle, ringAngle))
+            {
+                TriggerBlipOnRing(target.ringTransform);
+            }
+        }
+    }
+
+    void HandleVerticalFillAndDetection()
+    {
+        if (verticalFillImage == null) return;
+
+        previousFillAmount = currentFillAmount;
+        currentFillAmount = Mathf.Repeat(currentFillAmount + verticalSweepSpeed * Time.deltaTime, 1f);
+        verticalFillImage.fillAmount = currentFillAmount;
+
+        bool wrappedAround = currentFillAmount < previousFillAmount;
+        RectTransform fillRect = verticalFillImage.rectTransform;
+
+        foreach (RadarTarget target in radarTargets)
+        {
+            if (!target.isEnabledForTest || target.ringTransform == null) continue;
+
+            // Automatically uses the verticalFillImage's own height
+            Vector3 localPos = fillRect.InverseTransformPoint(target.ringTransform.position);
+            float normalizedY = Mathf.InverseLerp(fillRect.rect.yMin, fillRect.rect.yMax, localPos.y);
+            float targetProgress = sweepBottomToTop ? normalizedY : (1f - normalizedY);
+
+            bool crossed = wrappedAround
+                ? (targetProgress >= previousFillAmount || targetProgress <= currentFillAmount)
+                : (targetProgress >= previousFillAmount && targetProgress <= currentFillAmount);
+
+            if (crossed)
             {
                 TriggerBlipOnRing(target.ringTransform);
             }
